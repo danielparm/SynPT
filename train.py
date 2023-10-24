@@ -113,11 +113,26 @@ ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=
 
 # poor man's data loader
 data_dir = os.path.join('data', dataset)
-train_data = np.memmap(os.path.join(data_dir, 'train.bin'), dtype=np.uint16, mode='r')
-val_data = np.memmap(os.path.join(data_dir, 'val.bin'), dtype=np.uint16, mode='r')
+# train_trees = np.memmap(os.path.join(data_dir, 'train.bin'), dtype=np.uint16, mode='r')
+# val_trees = np.memmap(os.path.join(data_dir, 'val.bin'), dtype=np.uint16, mode='r')
+train_trees = np.load(os.path.join(data_dir, 'train.npy'), mmap_mode='r')
+val_trees = np.load(os.path.join(data_dir, 'val.npy'), mmap_mode='r')
+
+def get_tree(split):
+    data = train_trees if split == 'train' else val_trees
+    ix = torch.randint(len(data), (batch_size,))
+    x = torch.stack([torch.from_numpy((data[i][:block_size - 1]).astype(np.int64)) for i in ix])
+    y = torch.stack([torch.from_numpy((data[i][1:block_size]).astype(np.int64)) for i in ix])
+    if device_type == 'cuda':
+        # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
+        x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
+    else:
+        x, y = x.to(device), y.to(device)
+    return x, y
+
 def get_batch(split):
     data = train_data if split == 'train' else val_data
-    ix = torch.randint(len(data) - block_size, (batch_size,))
+    ix = torch.randint(len(data), (batch_size,))
     x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.int64)) for i in ix])
     y = torch.stack([torch.from_numpy((data[i+1:i+1+block_size]).astype(np.int64)) for i in ix])
     if device_type == 'cuda':
@@ -216,7 +231,7 @@ def estimate_loss():
     for split in ['train', 'val']:
         losses = torch.zeros(eval_iters)
         for k in range(eval_iters):
-            X, Y = get_batch(split)
+            X, Y = get_tree(split)
             with ctx:
                 logits, loss = model(X, Y)
             losses[k] = loss.item()
@@ -244,8 +259,9 @@ if wandb_log and master_process:
     wandb.init(project=wandb_project, name=wandb_run_name, config=config)
 
 # training loop
-X, Y = get_batch('train') # fetch the very first batch
+X, Y = get_tree('train') # fetch the very first batch
 t0 = time.time()
+tstart = t0
 local_iter_num = 0 # number of iterations in the lifetime of this process
 raw_model = model.module if ddp else model # unwrap DDP container if needed
 running_mfu = -1.0
@@ -259,10 +275,11 @@ while True:
     # evaluate the loss on train/val sets and write checkpoints
     if iter_num % eval_interval == 0 and master_process:
         losses = estimate_loss()
-        print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+        t1 = time.time()
+        print(f"step {iter_num/batch_size}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f} training time {(t1-tstart)/60:.2f} minutes")
         if wandb_log:
             wandb.log({
-                "iter": iter_num,
+                "iter": iter_num/batch_size,
                 "train/loss": losses['train'],
                 "val/loss": losses['val'],
                 "lr": lr,
@@ -280,7 +297,7 @@ while True:
                     'config': config,
                 }
                 print(f"saving checkpoint to {out_dir}")
-                torch.save(checkpoint, os.path.join(out_dir, 'ckpt.pt'))
+                torch.save(checkpoint, os.path.join(out_dir, 'exp13.pt'))
     if iter_num == 0 and eval_only:
         break
 
@@ -297,7 +314,7 @@ while True:
             logits, loss = model(X, Y)
             loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
         # immediately async prefetch next batch while model is doing the forward pass on the GPU
-        X, Y = get_batch('train')
+        X, Y = get_tree('train')
         # backward pass, with gradient scaling if training in fp16
         scaler.scale(loss).backward()
     # clip the gradient

@@ -1,5 +1,5 @@
 """
-Sample from a trained model
+Evaluate a trained model
 """
 import os
 import re
@@ -15,6 +15,8 @@ init_from = 'resume' # either 'resume' (from an out_dir) or a gpt2 variant (e.g.
 out_dir = 'out-syn_smiles_mapped' # ignored if init_from is not 'resume'
 start = "\n" # or "<|endoftext|>" or etc. Can also specify a file, use as: "FILE:prompt.txt"
 num_samples = 10 # number of samples to draw
+block_size = 1024
+batch_size = 32
 max_new_tokens = 200 # number of tokens generated in each sample
 temperature = 0.8 # 1.0 = no change, < 1.0 = less random, > 1.0 = more random, in predictions
 top_k = 200 # retain only the top_k most likely tokens, clamp others to have 0 probability
@@ -22,7 +24,7 @@ seed = 1337
 device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1', etc.
 dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32' or 'bfloat16' or 'float16'
 compile = False # use PyTorch 2.0 to compile the model to be faster
-dataset = 'syn_smiles'
+dataset = 'syn_smiles_mapped'
 exec(open('configurator.py').read()) # overrides from command line or config file
 # -----------------------------------------------------------------------------
 
@@ -51,14 +53,6 @@ elif init_from.startswith('gpt2'):
     # init from a given GPT-2 model
     model = GPT.from_pretrained(init_from, dict(dropout=0.0))
 
-def tokenise_smiles(smi):
-    pattern =  "(\[[^\]]+]|END_RXN?|END_TREE?|Br?|Cl?|N|O|S|P|F|I|b|c|n|o|s|p|\(|\)|\.|=|#|-|\+|\\\\|\/|:|~|@|\?|>|\*|\$|\%[0-9]{2}|[0-9])"
-    regex = re.compile(pattern)
-    tokens = [token for token in regex.findall(smi)]
-    assert smi == ''.join(tokens)
-    return tokens
-
-model.eval()
 model.to(device)
 if compile:
     model = torch.compile(model) # requires PyTorch 2.0 (optional)
@@ -85,15 +79,95 @@ else:
 
 # encode the beginning of the prompt
 data_dir = os.path.join('data', dataset)
-val_data = np.memmap(os.path.join(data_dir, 'test.bin'), dtype=np.uint16, mode='r')
+test_data = np.load(os.path.join(data_dir, 'test.npy'), mmap_mode='r')
 
-target_mols =  encode('OC(=O)NC1C(=O)N2C(C(=O)O)=C(CSc3nnc(CNC(=O)OC(C)(C)C)s3)CS[C@H]12>>CC(C)(C)OC(=O)NCc1nnc(SCC2=C(C(=O)O)N3C(=O)C(N)[C@H]3SC2)s1[ERXN][ETREE]CC(C)(C)OC(=O)NCc1nnc(SCC2=C(C(=O)O)N3C(=O)C(N)[C@H]3SC2)s1>>')
-x = (torch.tensor(target_mols, dtype=torch.long, device=device)[None, ...])
+def get_tree():
+    ix = torch.randint(len(test_data), (batch_size,))
+    x = torch.stack([torch.from_numpy((test_data[i][:block_size - 1]).astype(np.int64)) for i in ix])
+    y = torch.stack([torch.from_numpy((test_data[i][1:block_size]).astype(np.int64)) for i in ix])
+    if device_type == 'cuda':
+        # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
+        x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
+    else:
+        x, y = x.to(device), y.to(device)
+    return x, y
 
-# run generation
-with torch.no_grad():
-    with ctx:
-        for k in range(5):
-            y = model.generate(x, max_new_tokens, temperature=temperature, top_k=top_k)
-            print(decode(y[0].tolist()))
-            print('---------------')
+num_batches = int(len(test_data)/batch_size)
+
+@torch.no_grad()
+def estimate_loss():
+    model.eval()
+    losses = torch.zeros(num_batches)
+    for batch_num in range(num_batches):
+        X, Y = get_tree()
+        with ctx:
+            logits, loss = model(X, Y)
+        losses[batch_num] = loss.item()
+    avg_loss = losses.mean()
+    print(f"Average loss : {avg_loss}")
+    return avg_loss
+
+def tokenise_smiles(smi):
+    pattern =  "(\[[^\]]+]|ERXN?|ETREE?|STREE?|Br?|Cl?|N|O|S|P|F|I|b|c|n|o|s|p|\(|\)|\.|=|#|-|\+|\\\\|\/|:|~|!|@|\?|>|\*|\$|\%[0-9]{2}|[0-9])"
+    regex = re.compile(pattern)
+    tokens = [token for token in regex.findall(smi)]
+    assert smi == ''.join(tokens)
+    return tokens
+
+def exact_match(pred, gt):
+    return pred == gt
+
+def get_generated_mols(predictions):
+    targets = []
+    for pred in predictions:
+        try:
+            rxns = pred.split('[ERXN]')
+            tgt = rxns[0].split('>>')[1]
+            targets.append(tgt)
+        except:
+            targets.append('NOMATCH')
+    return targets
+
+def top_k_accuracy(results_dict, top_k):
+    correct_predictions = 0
+    for result in results_dict.values():
+        if True in result[:top_k+1]:
+            correct_predictions += 1
+
+    print(f'Accuracy for k = {top_k} is : {correct_predictions/len(results_dict)}')
+
+
+def eval_exact_match():
+    tree_dict = {}
+    results_dict = {}
+    for tree in test_data:
+        tree_str = decode(tree)
+        mols = tree_str.split('>>')
+        root = mols[0]
+        tgt = mols[1].split('[ERXN]')[0]
+        tree_dict[root] = tgt
+
+        ids = encode(root)
+        inp = x = (torch.tensor(ids, dtype=torch.long, device=device)[None, ...])
+        with torch.no_grad():
+            with ctx:
+                res = []
+                for k in range(5):
+                    y = model.generate(inp, max_new_tokens, temperature=temperature, top_k=200)
+                    res.append(decode(y[0].tolist()))
+
+        preds = get_generated_mols(res)
+        top_ks = [exact_match(pred, root) for pred in preds]
+        results_dict[root] = top_ks
+
+    
+
+    for k in range(top_k):
+        top_k_accuracy(results_dict, k)
+    
+
+
+# estimate_loss()
+eval_exact_match()
+
+
