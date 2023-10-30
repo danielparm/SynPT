@@ -276,7 +276,7 @@ while True:
     if iter_num % eval_interval == 0 and master_process:
         losses = estimate_loss()
         t1 = time.time()
-        print(f"step {iter_num/batch_size}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f} training time {(t1-tstart)/60:.2f} minutes")
+        print(f"step {batch_size*iter_num/len(train_trees)}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f} training time {(t1-tstart)/60:.2f} minutes")
         if wandb_log:
             wandb.log({
                 "iter": iter_num/batch_size,

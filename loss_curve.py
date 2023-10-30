@@ -42,12 +42,12 @@ for line in data.split('\n'):
         train_times.append(train_time)
 
 window_size = 5
-train_losses_ma = np.convolve(train_losses[15:], np.ones(window_size) / window_size, mode='valid')
-val_losses_ma = np.convolve(val_losses[15:], np.ones(window_size) / window_size, mode='valid')
+train_losses_ma = np.convolve(train_losses[5:], np.ones(window_size) / window_size, mode='valid')
+val_losses_ma = np.convolve(val_losses[5:], np.ones(window_size) / window_size, mode='valid')
 
 # Plotting the moving average loss curve against training time
-plt.plot(train_times[window_size - 1 + 15:], train_losses_ma, label='Moving Average Train Loss')
-plt.plot(train_times[window_size - 1 + 15:], val_losses_ma, label='Moving Average Validation Loss')
+plt.plot(train_times[window_size - 1 + 5:], train_losses_ma, label='Moving Average Train Loss')
+plt.plot(train_times[window_size - 1 + 5:], val_losses_ma, label='Moving Average Validation Loss')
 plt.xlabel('Training Time (minutes)')
 plt.ylabel('Loss')
 plt.legend()

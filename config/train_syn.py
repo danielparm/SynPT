@@ -12,7 +12,7 @@ wandb_run_name = 'mini-gpt'
 
 dataset = 'syn_smiles'
 gradient_accumulation_steps = 1
-batch_size = 64
+batch_size = 2048
 block_size = 1024 # context of up to 1024 previous characters
 
 # baby GPT model :)

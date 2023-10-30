@@ -37,7 +37,7 @@ ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=
 # model
 if init_from == 'resume':
     # init from a model saved in a specific directory
-    ckpt_path = os.path.join(out_dir, 'exp13.pt')
+    ckpt_path = os.path.join(out_dir, 'exp14.pt')
     checkpoint = torch.load(ckpt_path, map_location=device)
     gptconf = GPTConfig(**checkpoint['model_args'])
     model = GPT(gptconf)
@@ -87,7 +87,7 @@ else:
 data_dir = os.path.join('data', dataset)
 val_data = np.memmap(os.path.join(data_dir, 'test.bin'), dtype=np.uint16, mode='r')
 
-target_mols =  encode('OC(=O)NC1C(=O)N2C(C(=O)O)=C(CSc3nnc(CNC(=O)OC(C)(C)C)s3)CS[C@H]12>>CC(C)(C)OC(=O)NCc1nnc(SCC2=C(C(=O)O)N3C(=O)C(N)[C@H]3SC2)s1[ERXN][ETREE]CC(C)(C)OC(=O)NCc1nnc(SCC2=C(C(=O)O)N3C(=O)C(N)[C@H]3SC2)s1>>')
+target_mols =  encode('CC(=O)OCC1=C(C(=O)O)N2C(=O)C(NC(=O)Cc3ccccc3)[C@H]2SC1>>')
 x = (torch.tensor(target_mols, dtype=torch.long, device=device)[None, ...])
 
 # run generation
